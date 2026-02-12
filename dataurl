@@ -1,0 +1,336 @@
+#!/bin/bash
+set -euo pipefail
+
+VERSION="1.0.0"
+
+# --- Helpers ---
+
+usage() {
+    cat <<'EOF'
+Usage: dataurl <file> [output_file]
+
+Convert a file into a Data URL (RFC 2397).
+
+Arguments:
+  file          Input file path (required)
+  output_file   Output file path (optional; prints to stdout if omitted)
+
+Options:
+  -h, --help    Show this help message
+  -v, --version Show version
+EOF
+}
+
+err() {
+    printf '%s\n' "dataurl: $1" >&2
+}
+
+warn() {
+    printf '%s\n' "dataurl: warning: $1" >&2
+}
+
+# --- Argument parsing ---
+
+if [ $# -eq 0 ]; then
+    usage >&2
+    exit 1
+fi
+
+case "$1" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    -v|--version)
+        printf 'dataurl %s\n' "$VERSION"
+        exit 0
+        ;;
+    -*)
+        err "unknown option: $1"
+        usage >&2
+        exit 1
+        ;;
+esac
+
+INPUT_FILE="$1"
+OUTPUT_FILE="${2:-}"
+
+if [ ! -e "$INPUT_FILE" ]; then
+    err "file not found: $INPUT_FILE"
+    exit 1
+fi
+
+if [ ! -f "$INPUT_FILE" ]; then
+    err "not a regular file: $INPUT_FILE"
+    exit 1
+fi
+
+if [ ! -r "$INPUT_FILE" ]; then
+    err "cannot read file: $INPUT_FILE"
+    exit 1
+fi
+
+# Warn on empty files
+FILE_SIZE=$(stat -f%z "$INPUT_FILE")
+if [ "$FILE_SIZE" -eq 0 ]; then
+    warn "file is empty"
+fi
+
+# Warn on files > 5 MB
+if [ "$FILE_SIZE" -gt 5242880 ]; then
+    warn "file is large ($(( FILE_SIZE / 1048576 )) MB) — Data URLs this size may cause issues"
+fi
+
+# --- MIME type detection ---
+
+detect_mime() {
+    local file="$1"
+    local mime=""
+
+    # Tier 1: Extension override map
+    local ext=""
+    case "$file" in
+        *.*) ext="${file##*.}" ;;
+    esac
+    # Lowercase the extension (bash 3.2 compatible)
+    ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
+
+    if [ -n "$ext" ]; then
+        case "$ext" in
+            png)                mime="image/png" ;;
+            jpg|jpeg)           mime="image/jpeg" ;;
+            gif)                mime="image/gif" ;;
+            bmp)                mime="image/bmp" ;;
+            tif|tiff)           mime="image/tiff" ;;
+            ico)                mime="image/x-icon" ;;
+            svg)                mime="image/svg+xml" ;;
+            webp)               mime="image/webp" ;;
+            avif)               mime="image/avif" ;;
+            heic)               mime="image/heic" ;;
+            heif)               mime="image/heif" ;;
+            js|mjs|cjs)         mime="text/javascript" ;;
+            ts)                 mime="text/typescript" ;;
+            tsx)                mime="text/tsx" ;;
+            jsx)                mime="text/jsx" ;;
+            css)                mime="text/css" ;;
+            json)               mime="application/json" ;;
+            jsonld)             mime="application/ld+json" ;;
+            wasm)               mime="application/wasm" ;;
+            woff)               mime="font/woff" ;;
+            woff2)              mime="font/woff2" ;;
+            ttf)                mime="font/ttf" ;;
+            otf)                mime="font/otf" ;;
+            mp4|m4v)            mime="video/mp4" ;;
+            webm)               mime="video/webm" ;;
+            mp3)                mime="audio/mpeg" ;;
+            ogg|oga)            mime="audio/ogg" ;;
+            opus)               mime="audio/opus" ;;
+            flac)               mime="audio/flac" ;;
+            wav)                mime="audio/wav" ;;
+            csv)                mime="text/csv" ;;
+            tsv)                mime="text/tab-separated-values" ;;
+            rtf)                mime="application/rtf" ;;
+            doc)                mime="application/msword" ;;
+            dot)                mime="application/msword" ;;
+            xls)                mime="application/vnd.ms-excel" ;;
+            ppt)                mime="application/vnd.ms-powerpoint" ;;
+            docx)               mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document" ;;
+            xlsx)               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ;;
+            pptx)               mime="application/vnd.openxmlformats-officedocument.presentationml.presentation" ;;
+            odt)                mime="application/vnd.oasis.opendocument.text" ;;
+            ods)                mime="application/vnd.oasis.opendocument.spreadsheet" ;;
+            odp)                mime="application/vnd.oasis.opendocument.presentation" ;;
+            odg)                mime="application/vnd.oasis.opendocument.graphics" ;;
+            odf)                mime="application/vnd.oasis.opendocument.formula" ;;
+            wps)                mime="application/vnd.ms-works" ;;
+            et)                 mime="application/vnd.ms-excel" ;;
+            dps)                mime="application/vnd.ms-powerpoint" ;;
+            md)                 mime="text/markdown" ;;
+            yaml|yml)           mime="text/yaml" ;;
+            html|htm)           mime="text/html" ;;
+            xml)                mime="application/xml" ;;
+            pdf)                mime="application/pdf" ;;
+        esac
+    fi
+
+    if [ -n "$mime" ]; then
+        printf '%s' "$mime"
+        return
+    fi
+
+    # Tier 2: Magic number inspection
+    if [ "$FILE_SIZE" -gt 0 ]; then
+        local hex
+        hex=$(xxd -p -l 12 "$file" 2>/dev/null | tr -d '[:space:]')
+
+        if [ -n "$hex" ]; then
+            # PNG: 89 50 4E 47
+            case "$hex" in
+                89504e47*)
+                    printf 'image/png'; return ;;
+            esac
+
+            # JPEG: FF D8 FF
+            case "$hex" in
+                ffd8ff*)
+                    printf 'image/jpeg'; return ;;
+            esac
+
+            # GIF: 47 49 46 38
+            case "$hex" in
+                47494638*)
+                    printf 'image/gif'; return ;;
+            esac
+
+            # BMP: 42 4D
+            case "$hex" in
+                424d*)
+                    printf 'image/bmp'; return ;;
+            esac
+
+            # TIFF: 49 49 2A 00 (little-endian) or 4D 4D 00 2A (big-endian)
+            case "$hex" in
+                49492a00*|4d4d002a*)
+                    printf 'image/tiff'; return ;;
+            esac
+
+            # ICO: 00 00 01 00
+            case "$hex" in
+                00000100*)
+                    printf 'image/x-icon'; return ;;
+            esac
+
+            # PDF: 25 50 44 46
+            case "$hex" in
+                25504446*)
+                    printf 'application/pdf'; return ;;
+            esac
+
+            # WOFF: 77 4F 46 46
+            case "$hex" in
+                774f4646*)
+                    printf 'font/woff'; return ;;
+            esac
+
+            # WOFF2: 77 4F 46 32
+            case "$hex" in
+                774f4632*)
+                    printf 'font/woff2'; return ;;
+            esac
+
+            # GZIP: 1F 8B
+            case "$hex" in
+                1f8b*)
+                    printf 'application/gzip'; return ;;
+            esac
+
+            # FLAC: 66 4C 61 43
+            case "$hex" in
+                664c6143*)
+                    printf 'audio/flac'; return ;;
+            esac
+
+            # OGG: 4F 67 67 53
+            case "$hex" in
+                4f676753*)
+                    printf 'audio/ogg'; return ;;
+            esac
+
+            # MP3: FF Fx/Ex or ID3 tag (49 44 33)
+            case "$hex" in
+                fff[0-9a-f]*|ffe[0-9a-f]*)
+                    printf 'audio/mpeg'; return ;;
+                494433*)
+                    printf 'audio/mpeg'; return ;;
+            esac
+
+            # RIFF-based (WebP): 52 49 46 46 ... 57 45 42 50
+            case "$hex" in
+                52494646*)
+                    if [ "${#hex}" -ge 24 ]; then
+                        local riff_type="${hex:16:8}"
+                        if [ "$riff_type" = "57454250" ]; then
+                            printf 'image/webp'; return
+                        fi
+                    fi
+                    ;;
+            esac
+
+            # ftyp-based (MP4, HEIC, AVIF): offset 4 = "ftyp" (66 74 79 70)
+            if [ "${#hex}" -ge 24 ]; then
+                local ftyp_marker="${hex:8:8}"
+                if [ "$ftyp_marker" = "66747970" ]; then
+                    local brand="${hex:16:8}"
+                    case "$brand" in
+                        68656963) printf 'image/heic'; return ;;  # heic
+                        68656966) printf 'image/heif'; return ;;  # heif
+                        61766966) printf 'image/avif'; return ;;  # avif
+                        69736f6d|6d703431|6d703432)               # isom, mp41, mp42
+                            printf 'video/mp4'; return ;;
+                    esac
+                fi
+            fi
+        fi
+    fi
+
+    # Tier 3: file command fallback
+    if command -v file >/dev/null 2>&1; then
+        local file_mime
+        file_mime=$(file --mime-type -b "$file" 2>/dev/null || true)
+
+        if [ -n "$file_mime" ] && [ "$file_mime" != "application/octet-stream" ] && [ "$file_mime" != "inode/x-empty" ]; then
+            printf '%s' "$file_mime"
+            return
+        fi
+    fi
+
+    # Tier 4: Content inspection for text files
+    if [ "$FILE_SIZE" -gt 0 ]; then
+        local head_content
+        head_content=$(dd if="$file" bs=512 count=1 2>/dev/null || true)
+
+        if [ -n "$head_content" ]; then
+            # Lowercase for matching
+            local lower_content
+            lower_content=$(printf '%s' "$head_content" | tr '[:upper:]' '[:lower:]')
+
+            case "$lower_content" in
+                *'<svg'*)
+                    printf 'image/svg+xml'; return ;;
+                *'<!doctype html'*|*'<html'*)
+                    printf 'text/html'; return ;;
+                *'<?xml'*)
+                    printf 'application/xml'; return ;;
+            esac
+        fi
+    fi
+
+    # Tier 5: Final fallback — check if binary or text
+    if [ "$FILE_SIZE" -eq 0 ]; then
+        printf 'application/octet-stream'
+        return
+    fi
+
+    local file_encoding
+    file_encoding=$(file --mime-encoding -b "$file" 2>/dev/null || echo "binary")
+
+    case "$file_encoding" in
+        binary)
+            printf 'application/octet-stream' ;;
+        *)
+            printf 'text/plain' ;;
+    esac
+}
+
+# --- Main ---
+
+MIME=$(detect_mime "$INPUT_FILE")
+BASE64=$(openssl base64 -A -in "$INPUT_FILE")
+DATA_URL="data:${MIME};base64,${BASE64}"
+
+if [ -n "$OUTPUT_FILE" ]; then
+    printf '%s' "$DATA_URL" > "$OUTPUT_FILE"
+    printf 'Written to %s (%s, %d bytes encoded)\n' "$OUTPUT_FILE" "$MIME" "${#DATA_URL}" >&2
+else
+    printf '%s\n' "$DATA_URL"
+fi
